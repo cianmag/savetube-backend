@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import yt_dlp
 
@@ -6,7 +6,38 @@ app = Flask(__name__)
 CORS(app)
 
 @app.route('/api/info')
-def get_info():
+from flask import Response
+
+@app.route('/download')
+def download():
+    url = request.args.get('url')
+
+    if not url:
+        return "No URL provided", 400
+
+    try:
+        ydl_opts = {
+            'format': 'best',
+            'quiet': True
+        }
+
+        def generate():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                video_url = info['url']
+
+                import requests
+                r = requests.get(video_url, stream=True)
+
+                for chunk in r.iter_content(chunk_size=1024):
+                    if chunk:
+                        yield chunk
+
+        return Response(generate(), content_type="video/mp4")
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+        def get_info():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
