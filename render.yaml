@@ -1,16 +1,12 @@
 services:
   - type: web
-    name: yt-proxy-api
+    name: youtube-backend
     runtime: python
-
     buildCommand: |
       pip install -r requirements.txt
-      apt-get update && apt-get install -y ffmpeg
-
+      apt-get update
+      apt-get install -y ffmpeg
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
-
     envVars:
-      - key: REDIS_URL
-        sync: false
-      - key: YT_PO_TOKEN
-        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11
