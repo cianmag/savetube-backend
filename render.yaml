@@ -1,16 +1,27 @@
 services:
   - type: web
-    name: youtube-backend
+    name: yt-resolver-api
     runtime: python
-
-    buildCommand: pip install -r requirements.txt
-
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
-
+    buildCommand: chmod +x build.sh && ./build.sh
+    startCommand: >
+      gunicorn app:app
+      --workers 2
+      --timeout 120
+      --bind 0.0.0.0:$PORT
+      --log-level info
+      --access-logfile -
+      --error-logfile -
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11
+        value: 3.11.0
+      - key: YT_PO_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false
 
-    # ✅ THIS is the correct way to install ffmpeg
-    aptPackages:
-      - ffmpeg
+  - type: redis
+    name: yt-resolver-redis
+    plan: free
+    ipAllowList: []
