@@ -1,8 +1,8 @@
-flask
-flask-cors
-flask-limiter
-requests
-redis
-yt-dlp
-cachetools
-gunicorn
+flask==3.0.3
+flask-cors==4.0.1
+flask-limiter==3.7.0
+requests==2.32.3
+redis==5.0.7
+yt-dlp==2024.8.6
+cachetools==5.4.0
+gunicorn==22.0.0
