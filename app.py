@@ -21,25 +21,24 @@ from cachetools import TTLCache
 
 # --- VERIFY SYSTEM ---
 def verify_binaries():
-    missing = []
+    """Render check: Ensures FFmpeg and yt-dlp are installed via the build command."""
     for tool in ["yt-dlp", "ffmpeg"]:
         if not shutil.which(tool):
-            missing.append(tool)
-    if missing:
-        print(f"WARNING: Missing tools: {', '.join(missing)} (check Render build command)")
+            # This will show up in Render's build/service logs
+            print(f"CRITICAL: {tool} missing. Check Build Command.")
 
 verify_binaries()
 
 # --- CONFIG ---
 class Config:
-    REDIS_URL = os.environ.get("REDIS_URL")
+    REDIS_URL = os.environ.get("REDIS_URL") # Render provides this
     PO_TOKEN = os.environ.get("YT_PO_TOKEN")
     CHUNK_SIZE = 262144
     PORT = int(os.environ.get("PORT", 10000))
     HEADERS = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Encoding": "identity",
-        "Connection": "keep-alive"
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0',
+        'Accept-Encoding': 'identity',
+        'Connection': 'keep-alive'
     }
 
 app = Flask(__name__)
@@ -89,6 +88,7 @@ cb_lock = threading.Lock()
 @app.before_request
 def start_trace():
     g.start_time = time.time()
+    # Use Render's request ID if available
     g.req_id = request.headers.get("X-Render-Request-Id", str(uuid.uuid4()))
 
 logging.basicConfig(level=logging.INFO, format='[%(req_id)s] %(levelname)s: %(message)s')
@@ -96,13 +96,17 @@ logger = logging.getLogger("gateway")
 
 class ContextFilter(logging.Filter):
     def filter(self, record):
-        record.req_id = getattr(g, 'req_id', 'SYSTEM') if has_request_context() else "SYSTEM"
+        if has_request_context():
+            record.req_id = getattr(g, 'req_id', 'N/A')
+        else:
+            record.req_id = 'SYSTEM'
         return True
 
 logger.addFilter(ContextFilter())
 
 # --- RATE LIMIT ---
 def get_ip():
+    # Render uses Cloudflare/Load Balancers. Real IP is in X-Forwarded-For.
     fwd = request.headers.get("X-Forwarded-For")
     return fwd.split(",")[0] if fwd else request.remote_addr
 
@@ -113,99 +117,84 @@ limiter = Limiter(
     default_limits=["500/day", "100/hour"]
 )
 
-# --- META ---
+# --- META ENGINE ---
 def get_meta(url, fid):
     if cb.is_open():
         raise RuntimeError("Circuit breaker active")
 
-    key = f"{url}:{fid}"
+    key = f"meta:{url}:{fid}"
 
     with lock:
-        if key in l1_cache:
-            return l1_cache[key]
+        if key in l1_cache: return l1_cache[key]
 
     if r_client:
         cached = r_client.get(key)
         if cached:
             data = json.loads(cached)
-            with lock:
-                l1_cache[key] = data
+            with lock: l1_cache[key] = data
             return data
 
     try:
         opts = {
-            "quiet": True,
-            "format": fid,
-            "http_headers": Config.HEADERS,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+            'quiet': True,
+            'format': fid,
+            'http_headers': Config.HEADERS,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
         }
-
         if Config.PO_TOKEN:
-            opts["extractor_args"]["youtube"]["po_token"] = [f"web+{Config.PO_TOKEN}"]
+            opts['extractor_args']['youtube']['po_token'] = [f'web+{Config.PO_TOKEN}']
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             raw = ydl.extract_info(url, download=False)
 
-        with cb_lock:
-            cb.record_success()
+        with cb_lock: cb.record_success()
 
         meta = {
             "url": raw.get("url"),
             "title": re.sub(r'[\\/*?:"<>|]', "", raw.get("title") or "video"),
             "size": raw.get("filesize") or raw.get("filesize_approx"),
             "ext": raw.get("ext", "mp4"),
-            "is_combined": raw.get("vcodec") != "none" and raw.get("acodec") != "none"
+            "is_combined": raw.get('vcodec') != 'none' and raw.get('acodec') != 'none'
         }
 
-        with lock:
-            l1_cache[key] = meta
-
+        with lock: l1_cache[key] = meta
         if r_client:
             r_client.setex(key, 10800, json.dumps(meta))
-
+        
         return meta
 
     except Exception as e:
-        with cb_lock:
-            cb.record_failure()
+        with cb_lock: cb.record_failure()
         raise e
 
-# --- MUX ---
+# --- MUX ENGINE ---
 def mux_stream(url, fid):
     fmt = f"{fid}+bestaudio/best" if fid != "best" else "best"
-
     cmd = [
-        "yt-dlp", "-f", fmt,
-        "--merge-output-format", "mp4",
-        "-o", "-",
-        "--quiet", "--no-warnings",
-        "--add-header", f"User-Agent:{Config.HEADERS['User-Agent']}",
+        "yt-dlp", "-f", fmt, 
+        "--merge-output-format", "mp4", 
+        "-o", "-", 
+        "--quiet", "--no-warnings", 
         url
     ]
 
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # 15 Minute timeout for long videos
     timer = threading.Timer(900, p.kill)
     timer.start()
 
     try:
         while True:
-            if p.poll() is not None:
-                break
+            # Check if subprocess died
+            if p.poll() is not None: break
 
+            # Non-blocking read
             ready, _, _ = select.select([p.stdout], [], [], 30)
-            if not ready:
-                break
+            if not ready: break
 
             chunk = p.stdout.read(Config.CHUNK_SIZE)
-            if not chunk:
-                break
-
+            if not chunk: break
             yield chunk
-
-        stderr = p.stderr.read().decode()
-        if stderr:
-            logger.warning(stderr)
-
     finally:
         if p.poll() is None:
             p.terminate()
@@ -232,7 +221,8 @@ def proxy():
         return "Invalid format", 400
 
     try:
-        host = urlparse(url).netloc.lower().replace("www.", "").replace("m.", "")
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
         if not (host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"):
             return "Forbidden", 403
     except:
@@ -240,12 +230,10 @@ def proxy():
 
     try:
         meta = get_meta(url, fid)
-
         headers = {
             "Content-Disposition": f'attachment; filename="{meta["title"]}.{meta["ext"]}"',
             "Content-Type": f"video/{meta['ext']}",
             "Accept-Ranges": "bytes",
-            "Cache-Control": "no-cache",
             "X-Content-Type-Options": "nosniff"
         }
 
@@ -257,46 +245,37 @@ def proxy():
 
         def generate():
             success = False
-            start = time.time()
-
             if meta["is_combined"] and meta["url"]:
                 sent = 0
                 for attempt in range(2):
                     try:
                         h = Config.HEADERS.copy()
-                        if sent:
-                            h["Range"] = f"bytes={sent}-"
+                        if sent: h["Range"] = f"bytes={sent}-"
 
                         with session.get(meta["url"], stream=True, headers=h, timeout=(10, 30)) as r:
-                            if sent and r.status_code != 206:
-                                break
+                            if sent and r.status_code != 206: break
+                            r.raise_for_status()
 
                             for chunk in r.iter_content(Config.CHUNK_SIZE):
-                                if not chunk:
-                                    break
-
+                                if not chunk: break
                                 yield chunk
                                 sent += len(chunk)
-
-                                if time.time() - start > 900:
-                                    return
-
                         success = True
                         break
-
-                    except Exception:
-                        logger.warning("Fast path retry...")
+                    except Exception as e:
+                        logger.warning(f"Fast path attempt {attempt} failed. Retrying...")
 
             if not success:
-                logger.info("Switching to mux stream")
+                logger.info("Falling back to Mux-Stream")
                 yield from mux_stream(url, fid)
 
         return Response(stream_with_context(generate()), headers=headers)
 
     except Exception as e:
-        logger.error(f"FAIL: {e}")
+        logger.error(f"Request failed: {e}")
         return "Service Unavailable", 503
 
 # --- RUN ---
 if __name__ == "__main__":
+    # Render uses the PORT env var
     app.run(host="0.0.0.0", port=Config.PORT)
