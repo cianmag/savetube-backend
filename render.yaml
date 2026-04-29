@@ -2,11 +2,15 @@ services:
   - type: web
     name: youtube-backend
     runtime: python
-    buildCommand: |
-      pip install -r requirements.txt
-      apt-get update
-      apt-get install -y ffmpeg
+
+    buildCommand: pip install -r requirements.txt
+
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
+
+    # ✅ THIS is the correct way to install ffmpeg
+    aptPackages:
+      - ffmpeg
