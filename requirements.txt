@@ -1,9 +1,8 @@
 flask
 flask-cors
 flask-limiter
-yt-dlp
 requests
 redis
+yt-dlp
 cachetools
-gevent
 gunicorn
