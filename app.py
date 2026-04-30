@@ -41,15 +41,23 @@ class Config:
     REDIS_KEY_TTL  = 3600
 
     # yt-dlp base options
-    YDL_OPTS = {
-        'quiet':       True,
-        'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
+ YDL_OPTS = {
+    'quiet': True,
+    'no_warnings': True,
+    'extractor_args': {
+        'youtube': {
+            # ONLY android (remove 'web')
+            'player_client': ['android'],
+            'player_skip': ['webpage', 'configs']
         }
+    },
+    'http_headers': {
+        'User-Agent': (
+            'com.google.android.youtube/17.36.4 '
+            '(Linux; U; Android 12; GB) gzip'
+        )
     }
+}
 
 # ============================================================
 # FLASK APP
